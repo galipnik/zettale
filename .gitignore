@@ -1,0 +1,12 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# SQLite data (incl. WAL)
+*.db
+*.db-wal
+*.db-shm
+
+# OS
+.DS_Store
