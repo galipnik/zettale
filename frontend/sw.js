@@ -1,7 +1,7 @@
 // Service worker — caches the app shell so the PWA opens offline.
 // API requests are never cached (they go through the in-app offline queue).
 
-const CACHE = "zettale-shell-v4";
+const CACHE = "zettale-shell-v13";
 const SHELL = ["./index.html", "./manifest.webmanifest", "./mrs-saint-delafield-400.woff2"];
 
 self.addEventListener("install", e => {

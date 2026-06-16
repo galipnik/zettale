@@ -9,11 +9,12 @@ Run locally:
     uvicorn main:app --reload --port 8001
 """
 
+import json
 import os
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import Optional
+from typing import List, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Header, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -50,7 +51,14 @@ CREATE TABLE IF NOT EXISTS thoughts (
     archived   INTEGER NOT NULL DEFAULT 0,
     created_at TEXT    NOT NULL
 );
+CREATE TABLE IF NOT EXISTS settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
+
+DEFAULT_CONTEXTS = ["anexia", "pydata", "aau", "pycarinthia", "privat"]
+DEFAULT_DEFAULT_CONTEXT = "privat"
 
 
 @contextmanager
@@ -68,6 +76,17 @@ def get_db():
 def init_db():
     with get_db() as conn:
         conn.executescript(SCHEMA)
+        # Seed default settings once.
+        cur = conn.execute("SELECT COUNT(*) AS n FROM settings WHERE key='contexts'")
+        if cur.fetchone()["n"] == 0:
+            conn.execute(
+                "INSERT INTO settings (key, value) VALUES ('contexts', ?)",
+                (json.dumps(DEFAULT_CONTEXTS),),
+            )
+            conn.execute(
+                "INSERT INTO settings (key, value) VALUES ('default_context', ?)",
+                (DEFAULT_DEFAULT_CONTEXT,),
+            )
 
 
 def now() -> str:
@@ -121,6 +140,11 @@ def validate_due(d: str) -> str:
 class ThoughtIn(BaseModel):
     text: str = Field(min_length=1, max_length=2000)
     context: str = "privat"
+
+
+class ThoughtPatch(BaseModel):
+    text: Optional[str] = Field(default=None, min_length=1, max_length=2000)
+    context: Optional[str] = None
 
 
 class Thought(BaseModel):
@@ -254,6 +278,22 @@ def create_thought(t: ThoughtIn):
     return row_to_thought(row)
 
 
+@app.patch("/thoughts/{thought_id}", response_model=Thought, dependencies=[Depends(require_token)])
+def update_thought(thought_id: int, patch: ThoughtPatch):
+    with get_db() as conn:
+        row = conn.execute("SELECT * FROM thoughts WHERE id = ?", (thought_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="thought not found")
+        text = patch.text.strip() if patch.text is not None else row["text"]
+        context = validate_context(patch.context) if patch.context is not None else row["context"]
+        conn.execute(
+            "UPDATE thoughts SET text=?, context=? WHERE id=?",
+            (text, context, thought_id),
+        )
+        row = conn.execute("SELECT * FROM thoughts WHERE id = ?", (thought_id,)).fetchone()
+    return row_to_thought(row)
+
+
 @app.patch("/thoughts/{thought_id}/archive", response_model=Thought, dependencies=[Depends(require_token)])
 def archive_thought(thought_id: int):
     with get_db() as conn:
@@ -273,6 +313,139 @@ def delete_thought(thought_id: int):
         if cur.rowcount == 0:
             raise HTTPException(status_code=404, detail="thought not found")
     return Response(status_code=204)
+
+
+# --- settings (categories + default, synced across devices) ------------------
+
+class FilterGroup(BaseModel):
+    name: str
+    contexts: List[str]
+
+
+class Settings(BaseModel):
+    contexts: List[str]
+    default_context: str
+    groups: List[FilterGroup] = []
+
+
+def normalize_ctx(c: str) -> str:
+    c = (c or "").strip().lower()
+    return c if c and len(c) <= 30 and c.replace("-", "").isalnum() else ""
+
+
+def sanitize_groups(raw_groups, contexts) -> list:
+    """Keep every named group (even with no categories yet, so it can be built
+    up in the UI). Invalid category references are dropped."""
+    groups = []
+    for g in raw_groups or []:
+        name = (g.get("name") if isinstance(g, dict) else g.name or "").strip()[:40]
+        raw_ctx = g.get("contexts", []) if isinstance(g, dict) else g.contexts
+        seen, ctx = set(), []
+        for c in raw_ctx:
+            if c in contexts and c not in seen:
+                seen.add(c)
+                ctx.append(c)
+        if name:
+            groups.append({"name": name, "contexts": ctx})
+        if len(groups) >= 12:
+            break
+    return groups
+
+
+def read_settings(conn) -> dict:
+    rows = conn.execute("SELECT key, value FROM settings").fetchall()
+    kv = {r["key"]: r["value"] for r in rows}
+    try:
+        contexts = json.loads(kv.get("contexts", "[]"))
+    except json.JSONDecodeError:
+        contexts = []
+    if not contexts:
+        contexts = list(DEFAULT_CONTEXTS)
+    default_context = kv.get("default_context") or DEFAULT_DEFAULT_CONTEXT
+    if default_context not in contexts:
+        default_context = contexts[0]
+    try:
+        groups = json.loads(kv.get("groups", "[]"))
+    except json.JSONDecodeError:
+        groups = []
+    groups = sanitize_groups(groups, contexts)
+    return {"contexts": contexts, "default_context": default_context, "groups": groups}
+
+
+@app.get("/settings", response_model=Settings, dependencies=[Depends(require_token)])
+def get_settings():
+    with get_db() as conn:
+        return read_settings(conn)
+
+
+@app.put("/settings", response_model=Settings, dependencies=[Depends(require_token)])
+def put_settings(s: Settings):
+    # Sanitize: normalize, drop invalid/empty, dedupe (keep order), cap at 8.
+    seen, contexts = set(), []
+    for c in s.contexts:
+        n = normalize_ctx(c)
+        if n and n not in seen:
+            seen.add(n)
+            contexts.append(n)
+        if len(contexts) >= 8:
+            break
+    if not contexts:
+        contexts = list(DEFAULT_CONTEXTS)
+    default_context = normalize_ctx(s.default_context)
+    if default_context not in contexts:
+        default_context = contexts[0]
+    groups = sanitize_groups(s.groups, contexts)
+    with get_db() as conn:
+        write_settings(conn, contexts, default_context, groups)
+    return {"contexts": contexts, "default_context": default_context, "groups": groups}
+
+
+def write_settings(conn, contexts, default_context, groups):
+    conn.execute(
+        "INSERT INTO settings (key, value) VALUES ('contexts', ?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        (json.dumps(contexts),),
+    )
+    conn.execute(
+        "INSERT INTO settings (key, value) VALUES ('default_context', ?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        (default_context,),
+    )
+    conn.execute(
+        "INSERT INTO settings (key, value) VALUES ('groups', ?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        (json.dumps(groups),),
+    )
+
+
+class RenameContext(BaseModel):
+    old: str
+    new: str
+
+
+@app.post("/settings/rename-context", response_model=Settings, dependencies=[Depends(require_token)])
+def rename_context(r: RenameContext):
+    new = normalize_ctx(r.new)
+    if not new:
+        raise HTTPException(status_code=400, detail="invalid new name")
+    with get_db() as conn:
+        s = read_settings(conn)
+        contexts = s["contexts"]
+        if r.old not in contexts:
+            raise HTTPException(status_code=404, detail="context not found")
+        if new != r.old and new in contexts:
+            raise HTTPException(status_code=409, detail="name already exists")
+        # Migrate every task + thought that uses the old context.
+        conn.execute("UPDATE tasks SET context=? WHERE context=?", (new, r.old))
+        conn.execute("UPDATE thoughts SET context=? WHERE context=?", (new, r.old))
+        contexts = [new if c == r.old else c for c in contexts]
+        default_context = new if s["default_context"] == r.old else s["default_context"]
+        groups = [
+            {"name": g["name"], "contexts": [new if c == r.old else c for c in g["contexts"]]}
+            for g in s["groups"]
+        ]
+        write_settings(conn, contexts, default_context, groups)
+    return {"contexts": contexts, "default_context": default_context, "groups": groups}
 
 
 @app.get("/export", dependencies=[Depends(require_token)])

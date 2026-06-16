@@ -1,0 +1,37 @@
+services:
+  api:
+    build: ./backend
+    restart: unless-stopped
+    environment:
+      TODO_TOKEN: ${TODO_TOKEN:?set TODO_TOKEN in .env}
+      TODO_ORIGINS: https://${DOMAIN:?set DOMAIN in .env}
+      TODO_DB: /data/todo.db
+    volumes:
+      - todo-data:/data
+    expose:
+      - "8001"
+
+  web:
+    image: nginx:alpine
+    restart: unless-stopped
+    container_name: zettale-web
+    volumes:
+      - ./deploy/nginx/app.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./frontend:/srv:ro
+    depends_on:
+      - api
+    networks:
+      default: {}
+      npm:
+        aliases:
+          - zettale-web
+
+networks:
+  # The existing Nginx Proxy Manager network. Override NPM_NETWORK in .env if
+  # `docker network ls` shows a different name than nginx_default.
+  npm:
+    external: true
+    name: ${NPM_NETWORK:-nginx_default}
+
+volumes:
+  todo-data:

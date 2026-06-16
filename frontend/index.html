@@ -181,10 +181,12 @@
   .fc:hover, .fc:active { background: var(--line); }
   .fc-due { color: var(--text-faint); display: inline-flex; align-items: center; gap: 4px; }
   .fc-due svg { width: 13px; height: 13px; }
-  /* nativer Datepicker — unsichtbar, nur als Anker fürs Popup */
-  .date-pick {
-    width: 0; height: 0; padding: 0; margin: 0; border: 0;
-    opacity: 0; pointer-events: none; position: absolute;
+  /* nativer Datepicker: Feld liegt unsichtbar über dem Button, damit das
+     native Popup direkt unter dem Button ankert (nicht in der Ecke). */
+  .fc-date-wrap { position: relative; display: inline-flex; flex-shrink: 0; }
+  .fc-date-wrap input[type="date"] {
+    position: absolute; inset: 0; width: 100%; height: 100%;
+    opacity: 0; border: 0; padding: 0; margin: 0; pointer-events: none;
   }
 
   /* aufgaben */
@@ -246,7 +248,8 @@
   .check-sm {
     width: 21px; height: 21px; flex-shrink: 0; border-radius: 50%;
     border: 1.8px solid var(--line-strong); display: flex; align-items: center; justify-content: center;
-    transition: all 0.18s;
+    transition: all 0.18s; padding: 0; background: transparent; cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
   }
   .check-sm.checked { background: var(--done-color); border-color: var(--done-color); }
   .check-sm svg { width: 11px; height: 11px; color: #fff; }
@@ -259,9 +262,59 @@
     flex-shrink: 0; -webkit-tap-highlight-color: transparent;
     min-width: 30px; min-height: 30px; display: flex; align-items: center; justify-content: center;
   }
-  .thought:hover .del { opacity: 0.5; }
-  .del:hover { color: var(--heute); opacity: 1 !important; }
-  @media (hover: none) { .del { opacity: 0.35; } }
+  /* Action buttons take no horizontal space until the row is clicked. */
+  .del { display: none; opacity: 1; }
+  .thought.show-actions .del { display: flex; }
+  .del:hover { color: var(--heute); }
+  .edit-btn svg { width: 14px; height: 14px; }
+  .edit-btn:hover { color: var(--text) !important; }
+
+  /* inline editing */
+  .thought.is-task.editing .thought-main { gap: 10px; }
+  .edit-input {
+    flex: 1; min-width: 0; width: 100%;
+    border: 1px solid var(--line-strong); background: var(--bg); color: var(--text);
+    border-radius: 8px; padding: 8px 10px; font-size: 15px; font-family: inherit;
+    outline: none; line-height: 1.45;
+  }
+  .edit-input:focus { border-color: var(--accent); }
+  .edit-area { resize: none; }
+  .edit-act {
+    border: none; background: transparent; cursor: pointer; font-family: inherit;
+    font-size: 13px; font-weight: 560; padding: 6px 8px; border-radius: 7px;
+    color: var(--text-soft); flex-shrink: 0; -webkit-tap-highlight-color: transparent;
+  }
+  .edit-act.save { color: var(--done-color); }
+  .edit-act:hover { background: var(--line); }
+  .edit-date {
+    border: 1px solid var(--line-strong); background: var(--bg); color: var(--text);
+    border-radius: 8px; padding: 6px 8px; font-size: 13px; font-family: inherit;
+    outline: none; flex-shrink: 0; min-width: 0;
+  }
+  .edit-date:focus { border-color: var(--accent); }
+
+  /* config: category rename + filter groups */
+  .cfg-edit {
+    border: none; background: transparent; color: var(--text-faint); cursor: pointer;
+    padding: 4px; display: flex; align-items: center; transition: color 0.14s;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .cfg-edit svg { width: 15px; height: 15px; }
+  .cfg-edit:hover { color: var(--text); }
+  .cfg-group {
+    background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-sm);
+    padding: 11px 12px; margin-bottom: 8px; box-shadow: var(--shadow-sm);
+  }
+  .cfg-group-head { display: flex; align-items: center; gap: 8px; margin-bottom: 9px; }
+  .cfg-group-name { flex: 1; font-weight: 580; }
+  .cfg-group-cats { display: flex; flex-wrap: wrap; gap: 6px; }
+  .gcat {
+    border: 1px solid var(--line); background: transparent; color: var(--text-faint);
+    border-radius: 999px; padding: 4px 10px; font-size: 12px; font-weight: 580;
+    cursor: pointer; font-family: inherit; transition: all 0.14s; opacity: 0.7;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .gcat.on { opacity: 1; border-color: transparent; }
 
   /* config tab */
   .cfg-section { margin-bottom: 30px; }
@@ -384,18 +437,141 @@ const TOKEN = localStorage.getItem("todo_token") || "";
 const QUEUE_KEY = "todo_queue";
 
 const DEFAULT_CONTEXTS = ["anexia", "pydata", "aau", "pycarinthia", "privat"];
-let CONTEXTS = JSON.parse(localStorage.getItem("todo_contexts") || JSON.stringify(DEFAULT_CONTEXTS));
+// Categories + default live in the DB (synced across devices). localStorage is
+// just an offline cache so the UI renders instantly before /settings loads.
+let CONTEXTS   = JSON.parse(localStorage.getItem("todo_contexts") || JSON.stringify(DEFAULT_CONTEXTS));
+let DEFAULT_CTX = localStorage.getItem("todo_default_ctx") || "privat";
+let GROUPS     = JSON.parse(localStorage.getItem("todo_groups") || "[]");  // [{name, contexts:[...]}]
+
+function cacheSettings() {
+  localStorage.setItem("todo_contexts", JSON.stringify(CONTEXTS));
+  localStorage.setItem("todo_default_ctx", DEFAULT_CTX);
+  localStorage.setItem("todo_groups", JSON.stringify(GROUPS));
+}
 
 // Standard-Kategorie: Fallback beim Erfassen ohne @kontext + initialer Filter.
 function getDefaultCtx() {
-  const d = localStorage.getItem("todo_default_ctx");
-  if (d && CONTEXTS.includes(d)) return d;
+  if (CONTEXTS.includes(DEFAULT_CTX)) return DEFAULT_CTX;
   return CONTEXTS.includes("privat") ? "privat" : (CONTEXTS[0] || "privat");
 }
+
+// Push the current categories + default to the server.
+async function pushSettings() {
+  try {
+    const saved = await api("PUT", "/settings",
+      { contexts: CONTEXTS, default_context: getDefaultCtx(), groups: GROUPS });
+    CONTEXTS = saved.contexts;
+    DEFAULT_CTX = saved.default_context;
+    GROUPS = saved.groups || [];
+    cacheSettings();
+    applyContextStyles();
+  } catch (e) { /* keep local; will reconcile on next load/change */ }
+}
+
+// Load categories + default from the server (server is source of truth).
+// One-time upgrade migration: if this is the first sync on this device and the
+// server still has the untouched defaults while this device has customizations
+// (from the old localStorage-only version), push the local ones up first so
+// they aren't lost.
+async function refreshSettings() {
+  let server;
+  try { server = await api("GET", "/settings"); }
+  catch (e) { return; /* offline → keep cached */ }
+
+  if (!localStorage.getItem("todo_settings_synced")) {
+    localStorage.setItem("todo_settings_synced", "1");
+    const serverIsDefault = JSON.stringify(server.contexts) === JSON.stringify(DEFAULT_CONTEXTS);
+    const local = JSON.parse(localStorage.getItem("todo_contexts") || "null");
+    const localCustom = local && JSON.stringify(local) !== JSON.stringify(DEFAULT_CONTEXTS);
+    if (serverIsDefault && localCustom) {
+      CONTEXTS = local;
+      DEFAULT_CTX = localStorage.getItem("todo_default_ctx") || getDefaultCtx();
+      await pushSettings();   // caches + applies styles
+      return;
+    }
+  }
+
+  CONTEXTS = server.contexts;
+  DEFAULT_CTX = server.default_context;
+  GROUPS = server.groups || [];
+  cacheSettings();
+  applyContextStyles();
+}
+
 function setDefaultCtx(name) {
   if (!CONTEXTS.includes(name)) return;
-  localStorage.setItem("todo_default_ctx", name);
+  DEFAULT_CTX = name;
+  cacheSettings();
+  pushSettings();
   if (view === "config") renderConfig();
+}
+
+// Rename a category everywhere (settings + all tasks/thoughts) via the server.
+let editingCtx = null;
+function startRenameCtx(c) { editingCtx = c; renderConfig(); }
+function cancelRenameCtx() { editingCtx = null; renderConfig(); }
+async function renameCtx(old, val) {
+  editingCtx = null;
+  const nn = (val || "").trim().toLowerCase().replace(/[^a-z0-9]/g, "");
+  if (!nn || nn === old) { renderConfig(); return; }
+  if (CONTEXTS.includes(nn)) { alert(t("catExists")); renderConfig(); return; }
+  try {
+    const s = await api("POST", "/settings/rename-context", { old, new: nn });
+    CONTEXTS = s.contexts; DEFAULT_CTX = s.default_context; GROUPS = s.groups || [];
+    cacheSettings(); applyContextStyles();
+    tasks.forEach(x => { if (x.context === old) x.context = nn; });
+    thoughts.forEach(x => { if (x.context === old) x.context = nn; });
+    if (filter === old) filter = nn;
+    if (gFilter === old) gFilter = nn;
+  } catch (e) { alert(t("renameFailed")); }
+  renderConfig();
+}
+
+// ── filter groups ───────────────────────────────────────────────────────────
+function addGroup() {
+  const inp = document.getElementById("new-group");
+  if (!inp) return;
+  const name = inp.value.replace(/["'\\<>]/g, "").trim().slice(0, 40);
+  if (!name) return;
+  if (GROUPS.length >= 12) return;
+  GROUPS.push({ name, contexts: [] });
+  cacheSettings(); pushSettings();
+  inp.value = "";
+  renderConfig();
+}
+function removeGroup(idx) {
+  GROUPS.splice(idx, 1);
+  cacheSettings(); pushSettings();
+  // dropped group might be the active filter
+  if (!filterKeys().includes(filter)) filter = "all";
+  if (!filterKeys().includes(gFilter)) gFilter = "all";
+  renderConfig();
+}
+function toggleGroupCtx(idx, ctx) {
+  const g = GROUPS[idx]; if (!g) return;
+  g.contexts = g.contexts.includes(ctx) ? g.contexts.filter(c => c !== ctx) : [...g.contexts, ctx];
+  cacheSettings(); pushSettings();
+  renderConfig();
+}
+function renameGroup(idx, value) {
+  const g = GROUPS[idx]; if (!g) return;
+  const name = (value || "").replace(/["'\\<>]/g, "").trim().slice(0, 40);
+  if (!name || name === g.name) { renderConfig(); return; }
+  g.name = name;
+  cacheSettings(); pushSettings();
+  renderConfig();
+}
+
+// Valid filter selections: "all" + group names (or category names as fallback).
+function filterKeys() {
+  return ["all", ...(GROUPS.length ? GROUPS.map(g => g.name) : CONTEXTS)];
+}
+// Does an item match the current filter selection?
+function filterMatch(item, sel) {
+  if (sel === "all") return true;
+  const g = GROUPS.find(x => x.name === sel);
+  if (g) return g.contexts.includes(item.context);
+  return item.context === sel;   // fallback when no groups defined
 }
 
 // Kohärente, abgestimmte Palette. Pro Hue je eine helle und eine dunkle Variante,
@@ -467,6 +643,11 @@ const T = {
     noThoughts: "No thoughts yet.<br>Ideas, notes, anything — sort later.",
     noThoughtsCtx: "No thoughts in this context.",
     archive: "Archive", toTask: "Task", del: "Delete",
+    edit: "Edit", save: "Save", cancel: "Cancel",
+    catExists: "Category already exists.", renameFailed: "Rename failed.",
+    filters: "Filters", newGroup: "Filter name", category: "Category",
+    filterHint: "Group categories into named filters. When defined, the task and thought lists show these filters instead of single categories.",
+    noFilters: "No filters yet — tap categories to add them to a group.",
     overdue: "overdue", today: "today", tomorrow: "tomorrow",
     justNow: "just now", min: "min", hour: "h", day: "d",
     appearance: "Appearance", system: "System", light: "Light", dark: "Dark",
@@ -495,6 +676,11 @@ const T = {
     noThoughts: "Noch keine Gedanken.<br>Ideen, Notizen, alles rein — dann sortieren.",
     noThoughtsCtx: "Keine Gedanken in diesem Kontext.",
     archive: "Archiv", toTask: "Aufgabe", del: "Löschen",
+    edit: "Bearbeiten", save: "Speichern", cancel: "Abbrechen",
+    catExists: "Kategorie existiert bereits.", renameFailed: "Umbenennen fehlgeschlagen.",
+    filters: "Filter", newGroup: "Filtername", category: "Kategorie",
+    filterHint: "Kategorien zu benannten Filtern gruppieren. Sind Filter definiert, zeigen die Aufgaben- und Gedankenliste diese statt einzelner Kategorien.",
+    noFilters: "Noch keine Filter — tippe Kategorien an, um sie einer Gruppe hinzuzufügen.",
     overdue: "überfällig", today: "heute", tomorrow: "morgen",
     justNow: "gerade eben", min: "Min.", hour: "Std.", day: "T.",
     appearance: "Darstellung", system: "System", light: "Hell", dark: "Dunkel",
@@ -526,10 +712,12 @@ document.documentElement.setAttribute("lang", LANG);
 
 let tasks    = [];
 let thoughts = [];
-let filter   = getDefaultCtx();
-let gFilter  = getDefaultCtx();
+let filter   = "all";
+let gFilter  = "all";
+let editing  = null;   // { type: "task"|"thought", id } currently being edited
 let view     = "aufgaben";
 let expanded = null;
+let taskActions = null;   // id of the task row whose edit/delete actions are revealed (tap on touch)
 let showArchive = false;
 let online   = navigator.onLine;
 
@@ -775,11 +963,48 @@ async function thoughtToTask(id, ev) {
 }
 
 function toggleExpand(id) { expanded = expanded === id ? null : id; render(); }
+function toggleTaskActions(id) { taskActions = taskActions === id ? null : id; render(); }
+
+// ── inline editing (tasks + thoughts) ──────────────────────────────────────
+function startEdit(type, id, ev) {
+  if (ev) ev.stopPropagation();
+  if (String(id).startsWith("tmp-")) return;
+  editing = { type, id };
+  render();
+}
+function cancelEdit(ev) { if (ev) ev.stopPropagation(); editing = null; render(); }
+
+function editKey(ev, type, id) {
+  if (ev.key === "Escape") { ev.preventDefault(); cancelEdit(); }
+  else if (ev.key === "Enter" && !ev.shiftKey) { ev.preventDefault(); saveEdit(type, id); }
+}
+
+async function saveEdit(type, id, ev) {
+  if (ev) ev.stopPropagation();
+  const inp = document.getElementById("edit-input");
+  if (!inp) return;
+  const text = inp.value.trim();
+  if (!text) { cancelEdit(); return; }
+  editing = null;
+  if (type === "task") {
+    const dateEl = document.getElementById("edit-date");
+    const due = dateEl ? dateEl.value : undefined;   // "" clears the deadline
+    const it = tasks.find(x => x.id === id);
+    if (it) { it.text = text; if (due !== undefined) it.due = due; }
+    render();
+    const body = due !== undefined ? { text, due } : { text };
+    try { await api("PATCH", "/tasks/" + id, body); }
+    catch { const q = loadQueue(); q.push({ method: "PATCH", path: "/tasks/" + id, body }); saveQueue(q); }
+  } else {
+    const it = thoughts.find(x => x.id === id);
+    if (it) it.text = text;
+    render();
+    try { await api("PATCH", "/thoughts/" + id, { text }); } catch { }
+  }
+}
 function toggleArchiveSection(ev) { ev.stopPropagation(); showArchive = !showArchive; render(); }
 
-// context config
-function saveContexts() { localStorage.setItem("todo_contexts", JSON.stringify(CONTEXTS)); }
-
+// context config — optimistic local update, then sync to DB.
 function addCtx() {
   const inp = document.getElementById("new-ctx");
   if (!inp) return;
@@ -788,8 +1013,9 @@ function addCtx() {
   if (CONTEXTS.includes(val)) { inp.value = ""; return; }
   if (CONTEXTS.length >= 8) { alert(t("maxCats")); return; }
   CONTEXTS.push(val);
-  saveContexts();
+  cacheSettings();
   applyContextStyles();
+  pushSettings();
   inp.value = "";
   renderConfig();
 }
@@ -797,14 +1023,12 @@ function addCtx() {
 function removeCtx(name) {
   if (CONTEXTS.length <= 1) return;
   CONTEXTS = CONTEXTS.filter(c => c !== name);
-  saveContexts();
+  if (DEFAULT_CTX === name) DEFAULT_CTX = getDefaultCtx();
+  cacheSettings();
   applyContextStyles();
-  // War's die Standard-Kategorie, neu zuweisen; Filter ggf. nachziehen.
-  if (localStorage.getItem("todo_default_ctx") === name) {
-    localStorage.setItem("todo_default_ctx", getDefaultCtx());
-  }
-  if (!CONTEXTS.includes(filter)) filter = getDefaultCtx();
-  if (!CONTEXTS.includes(gFilter)) gFilter = getDefaultCtx();
+  pushSettings();
+  if (!CONTEXTS.includes(filter)) filter = "all";
+  if (!CONTEXTS.includes(gFilter)) gFilter = "all";
   renderConfig();
 }
 
@@ -821,7 +1045,7 @@ function setupAc(id) {
     if (m) {
       const q = m[2].toLowerCase();
       const matches = CONTEXTS.filter(c => !q || c.startsWith(q));
-      if (matches.length) { showAc(matches, m[2]); return; }
+      if (matches.length) { showAc(matches); return; }
     }
     closeAc();
   });
@@ -829,7 +1053,16 @@ function setupAc(id) {
   inp.addEventListener("blur", () => setTimeout(closeAc, 150));
 }
 
-function showAc(matches, query) {
+// Open the same suggestion dropdown via the footer button (shows all categories).
+function openCtxPicker(id) {
+  const inp = document.getElementById(id);
+  if (!inp) return;
+  acField = inp;
+  inp.focus();
+  showAc(CONTEXTS);
+}
+
+function showAc(matches) {
   let dd = document.getElementById("ac-dd");
   if (!dd) { dd = document.createElement("div"); dd.id = "ac-dd"; document.body.appendChild(dd); }
   const rect = acField.getBoundingClientRect();
@@ -837,7 +1070,7 @@ function showAc(matches, query) {
   dd.style.top  = (rect.bottom - 6) + "px";
   dd.innerHTML = matches.map(c =>
     `<button class="ac-btn" style="color:var(--${c})"
-      onmousedown="event.preventDefault()" onclick="pickAc('${c}','${query}')">@${c}</button>`
+      onmousedown="event.preventDefault()" onclick="pickAc('${c}')">${c}</button>`
   ).join("");
 }
 
@@ -846,12 +1079,20 @@ function closeAc() {
   if (el) el.remove();
 }
 
-function pickAc(ctx, query) {
+function pickAc(ctx) {
   if (!acField) return;
-  const pos = acField.selectionStart;
-  const val = acField.value;
-  const fixed = val.slice(0, pos).replace(/(^|\s)@\w*$/, m => m.replace(/@\w*$/, "@" + ctx));
-  acField.value = fixed + val.slice(pos);
+  const pos = acField.selectionStart ?? acField.value.length;
+  const before = acField.value.slice(0, pos), after = acField.value.slice(pos);
+  let fixed;
+  if (/(^|\s)@\w*$/.test(before)) {
+    // completing a partially typed @token
+    fixed = before.replace(/(^|\s)@\w*$/, m => m.replace(/@\w*$/, "@" + ctx)) + " ";
+  } else {
+    // inserting fresh (e.g. from the footer button)
+    const sep = before && !before.endsWith(" ") ? " " : "";
+    fixed = before + sep + "@" + ctx + " ";
+  }
+  acField.value = fixed + after;
   acField.selectionStart = acField.selectionEnd = fixed.length;
   acField.focus();
   closeAc();
@@ -869,7 +1110,10 @@ async function refreshThoughts() {
 }
 
 async function refresh() {
-  await Promise.all([refreshTasks(), refreshThoughts()]);
+  await Promise.all([refreshSettings(), refreshTasks(), refreshThoughts()]);
+  // Filters may reference a category removed on another device.
+  if (!CONTEXTS.includes(filter) && filter !== "all") filter = "all";
+  if (!CONTEXTS.includes(gFilter) && gFilter !== "all") gFilter = "all";
   render();
 }
 
@@ -897,6 +1141,7 @@ const ICON_ARCHIVE   = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColo
 const ICON_TRASH     = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 4h10M6 4V2.5h4V4M5 4l.5 9h5l.5-9"/></svg>';
 const ICON_CHEVRON_R = '<svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 2l4 4-4 4"/></svg>';
 const ICON_CAL       = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="12" height="11" rx="2"/><path d="M2 6.5h12M5.5 1.5v3M10.5 1.5v3"/></svg>';
+const ICON_EDIT      = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M10.5 2.7l2.8 2.8M11.6 1.6a1.4 1.4 0 0 1 2 2L5.3 11.9 2 13l1.1-3.3z"/></svg>';
 const ICON_STAR      = '<svg viewBox="0 0 16 16" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"><path d="M8 2l1.7 3.6 3.9.5-2.9 2.7.8 3.9L8 10.8 4.5 12.7l.8-3.9L2.4 6.1l3.9-.5z"/></svg>';
 const ICON_LOGO      = '<svg viewBox="0 0 24 24" fill="none"><defs><linearGradient id="zg" x1="3" y1="3" x2="21" y2="21" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#ef9f6f"/><stop offset="1" stop-color="#c0562d"/></linearGradient></defs><rect x="2.5" y="2.5" width="19" height="19" rx="5.6" fill="url(#zg)"/><rect x="2.5" y="2.5" width="19" height="9.2" rx="5.6" fill="#fff" opacity="0.13"/><path d="M8.2 8.3h7.6l-7.6 7.4h7.6" stroke="#fff" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/><path d="M18.7 4.4l.5 1.35 1.35.5-1.35.5-.5 1.35-.5-1.35-1.35-.5 1.35-.5z" fill="#fff" opacity="0.92"/></svg>';
 const ICON_EXPORT    = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2v8M5 7l3 3 3-3M3 12h10"/></svg>';
@@ -933,33 +1178,68 @@ function dueLabel(iso) {
 }
 
 function taskRow(task) {
+  const isEditing = editing && editing.type === "task" && editing.id === task.id;
+  if (isEditing) {
+    return `<div class="thought is-task editing">
+      <div class="thought-main">
+        <div class="check-sm"></div>
+        <input id="edit-input" class="edit-input" value="${esc(task.text)}"
+          onkeydown="editKey(event,'task',${taskId(task)})"
+          autocapitalize="none" autocorrect="off" spellcheck="true">
+        <input type="date" id="edit-date" class="edit-date" value="${task.due || ""}" aria-label="${t("date")}">
+        <button class="edit-act save" onclick="saveEdit('task',${taskId(task)},event)">${t("save")}</button>
+        <button class="edit-act" onclick="cancelEdit(event)">${t("cancel")}</button>
+      </div>
+    </div>`;
+  }
   const overdueOrToday = task.due && task.due <= todayISO();
   const due = task.due
     ? `<span class="due ${overdueOrToday ? "heute" : ""}">${dueLabel(task.due)}</span>`
     : "";
-  return `<div class="thought is-task ${task.done ? "task-done" : ""} ${task.pending ? "pending" : ""}" onclick="toggleDone(${taskId(task)})">
+  const isExpanded = taskActions === task.id;
+  const actions = isExpanded ? `
+    <div class="thought-actions">
+      <button class="thought-action" onclick="startEdit('task',${taskId(task)},event)">${ICON_EDIT} ${t("edit")}</button>
+      <button class="thought-action delete-btn" onclick="delTask(${taskId(task)}, event)">${ICON_TRASH} ${t("del")}</button>
+    </div>` : "";
+  return `<div class="thought is-task ${task.done ? "task-done" : ""} ${task.pending ? "pending" : ""} ${isExpanded ? "expanded" : ""}" onclick="toggleTaskActions(${taskId(task)})">
     <div class="thought-main">
-      <div class="check-sm ${task.done ? "checked" : ""}">${task.done ? CHECK_SVG : ""}</div>
+      <button class="check-sm ${task.done ? "checked" : ""}" onclick="event.stopPropagation();toggleDone(${taskId(task)})" aria-label="${t("done")}">${task.done ? CHECK_SVG : ""}</button>
       <span class="thought-text ${task.done ? "done-text" : ""}">${esc(task.text)}</span>
-      <span class="chip" style="background:var(--${task.context}-bg,var(--chip-bg));color:var(--${task.context},var(--chip-fg))">@${task.context}</span>
+      <span class="chip" style="background:var(--${task.context}-bg,var(--chip-bg));color:var(--${task.context},var(--chip-fg))">${task.context}</span>
       ${due}
-      <button class="del" onclick="delTask(${taskId(task)}, event)" aria-label="${t("del")}">×</button>
     </div>
+    ${actions}
   </div>`;
 }
 
 function thoughtCard(task) {
+  const isEditing = editing && editing.type === "thought" && editing.id === task.id;
+  if (isEditing) {
+    return `<div class="thought expanded">
+      <div class="thought-main" style="display:block">
+        <textarea id="edit-input" class="edit-input edit-area" rows="3"
+          onkeydown="editKey(event,'thought',${taskId(task)})"
+          autocapitalize="none" autocorrect="off" spellcheck="true">${esc(task.text)}</textarea>
+      </div>
+      <div class="thought-actions">
+        <button class="thought-action to-task" onclick="saveEdit('thought',${taskId(task)},event)">${t("save")}</button>
+        <button class="thought-action" onclick="cancelEdit(event)">${t("cancel")}</button>
+      </div>
+    </div>`;
+  }
   const isExpanded = expanded === task.id;
   const actions = isExpanded ? `
     <div class="thought-actions">
       <button class="thought-action to-task" onclick="thoughtToTask(${taskId(task)}, event)">${ICON_ARROW_R} ${t("toTask")}</button>
+      <button class="thought-action" onclick="startEdit('thought',${taskId(task)},event)">${ICON_EDIT} ${t("edit")}</button>
       <button class="thought-action archive" onclick="archiveThought(${taskId(task)}, event)">${ICON_ARCHIVE} ${t("archive")}</button>
       <button class="thought-action delete-btn" onclick="delThought(${taskId(task)}, event)">${ICON_TRASH} ${t("del")}</button>
     </div>` : "";
   return `<div class="thought ${isExpanded ? "expanded" : ""} ${task.archived ? "archived" : ""}" onclick="toggleExpand(${taskId(task)})">
     <div class="thought-main">
-      <span class="thought-ctx chip" style="background:var(--${task.context}-bg,var(--chip-bg));color:var(--${task.context},var(--chip-fg))">@${task.context}</span>
       <span class="thought-text">${esc(task.text)}</span>
+      <span class="thought-ctx chip" style="background:var(--${task.context}-bg,var(--chip-bg));color:var(--${task.context},var(--chip-fg))">${task.context}</span>
       <span class="thought-time">${fmtTime(task.created_at)}</span>
     </div>
     ${actions}
@@ -998,11 +1278,15 @@ function renderAufgaben() {
   };
   const open = tasks.filter(t => !t.done).sort(cmp);
   const done = tasks.filter(t => t.done).sort(cmp);
-  const match = t => filter === "all" || t.context === filter;
 
-  const filterBtns = ["all", ...CONTEXTS].map(f => {
-    const label = f === "all" ? t("all") : "@" + f;
-    return `<button class="flt ${filter === f ? "active" : ""}" onclick="setFilter('${f}')">${label}</button>`;
+  // Filter chips: only user-defined groups (that have categories). No single categories.
+  const opts = GROUPS.filter(g => g.contexts.length).map(g => g.name);
+  if (filter !== "all" && !opts.includes(filter)) filter = "all";
+  const match = t => filterMatch(t, filter);
+
+  const filterBtns = ["all", ...opts].map(f => {
+    const label = f === "all" ? t("all") : f;
+    return `<button class="flt ${filter === f ? "active" : ""}" onclick="setFilter('${f}')">${esc(label)}</button>`;
   }).join("");
 
   const openVisible = open.filter(match);
@@ -1026,10 +1310,13 @@ function renderAufgaben() {
       <textarea id="capture" rows="2" placeholder="${t("taskPh")}" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="true"></textarea>
       <div class="capture-footer">
         <div class="footer-chips">
+          <button class="fc fc-due" onmousedown="event.preventDefault()" onclick="openCtxPicker('capture')">@ ${t("category")}</button>
           <button class="fc fc-due" onclick="insertDue('${t("dueToday")}')">!${t("dueToday")}</button>
           <button class="fc fc-due" onclick="insertDue('${t("dueWeek")}')">!${t("dueWeek")}</button>
-          <button class="fc fc-due" onclick="openDatePicker()" aria-label="${t("pickDate")}">${ICON_CAL} ${t("date")}</button>
-          <input type="date" id="date-pick" class="date-pick" onchange="insertDate(this.value)" tabindex="-1" aria-hidden="true">
+          <span class="fc-date-wrap">
+            <button class="fc fc-due" onclick="openDatePicker()" aria-label="${t("pickDate")}">${ICON_CAL} ${t("date")}</button>
+            <input type="date" id="date-pick" onchange="insertDate(this.value)" tabindex="-1" aria-hidden="true">
+          </span>
         </div>
         <button id="addbtn" onclick="addTask()">${t("add")}</button>
       </div>
@@ -1043,6 +1330,13 @@ function renderAufgaben() {
   inp.value = savedValue;
   inp.onkeydown = e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); addTask(); } };
   setupAc("capture");
+  focusEdit();
+}
+
+// Focus + place caret at end of the inline edit field after a render.
+function focusEdit() {
+  const e = document.getElementById("edit-input");
+  if (e) { e.focus(); const v = e.value; e.value = ""; e.value = v; }
 }
 
 function renderGedanken() {
@@ -1052,10 +1346,13 @@ function renderGedanken() {
   const active   = thoughts.filter(t => !t.archived);
   const archived = thoughts.filter(t => t.archived);
 
-  const gMatch = t => gFilter === "all" || t.context === gFilter;
-  const filterBtns = ["all", ...CONTEXTS].map(f => {
-    const label = f === "all" ? t("all") : "@" + f;
-    return `<button class="flt ${gFilter === f ? "active" : ""}" onclick="setGFilter('${f}')">${label}</button>`;
+  // Filter chips: only user-defined groups (that have categories). No single categories.
+  const opts = GROUPS.filter(g => g.contexts.length).map(g => g.name);
+  if (gFilter !== "all" && !opts.includes(gFilter)) gFilter = "all";
+  const gMatch = t => filterMatch(t, gFilter);
+  const filterBtns = ["all", ...opts].map(f => {
+    const label = f === "all" ? t("all") : f;
+    return `<button class="flt ${gFilter === f ? "active" : ""}" onclick="setGFilter('${f}')">${esc(label)}</button>`;
   }).join("");
 
   const visible = active.filter(gMatch);
@@ -1084,7 +1381,9 @@ function renderGedanken() {
     <div class="capture-wrap">
       <textarea id="thought-input" rows="2" placeholder="${t("thoughtPh")}" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="true"></textarea>
       <div class="capture-footer">
-        <span class="hint-inline"><code>${t("ctxToken")}</code> optional</span>
+        <div class="footer-chips">
+          <button class="fc fc-due" onmousedown="event.preventDefault()" onclick="openCtxPicker('thought-input')">@ ${t("category")}</button>
+        </div>
         <button id="addbtn" onclick="addThought()">${t("capture")}</button>
       </div>
     </div>
@@ -1096,20 +1395,50 @@ function renderGedanken() {
   const inp = document.getElementById("thought-input");
   inp.value = savedValue;
   inp.onkeydown = e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); addThought(); } };
-  if (window.matchMedia("(hover: hover)").matches) inp.focus();
+  if (!editing && window.matchMedia("(hover: hover)").matches) inp.focus();
   setupAc("thought-input");
+  focusEdit();
 }
 
 function renderConfig() {
   const def = getDefaultCtx();
-  const ctxItems = CONTEXTS.map(c => `
-    <div class="cfg-row">
-      <span class="chip" style="background:var(--${c}-bg,var(--chip-bg));color:var(--${c},var(--chip-fg))">@${c}</span>
+  const ctxItems = CONTEXTS.map(c => {
+    if (editingCtx === c) {
+      return `<div class="cfg-row">
+        <input id="edit-input" class="cfg-input" value="${c}" maxlength="30"
+          autocapitalize="none" autocorrect="off" spellcheck="false"
+          onkeydown="if(event.key==='Enter'){event.preventDefault();renameCtx('${c}',this.value)}else if(event.key==='Escape'){cancelRenameCtx()}">
+        <div class="cfg-actions">
+          <button class="edit-act save" onclick="renameCtx('${c}',document.getElementById('edit-input').value)">${t("save")}</button>
+          <button class="edit-act" onclick="cancelRenameCtx()">${t("cancel")}</button>
+        </div>
+      </div>`;
+    }
+    return `<div class="cfg-row">
+      <span class="chip" style="background:var(--${c}-bg,var(--chip-bg));color:var(--${c},var(--chip-fg))">${c}</span>
       <div class="cfg-actions">
         <button class="cfg-star ${c === def ? "is-default" : ""}" onclick="setDefaultCtx('${c}')"
           aria-label="${c === def ? t("defaultCat") : t("setDefault")}"
           title="${c === def ? t("defaultCat") : t("setDefault")}">${ICON_STAR}</button>
+        <button class="cfg-edit" onclick="startRenameCtx('${c}')" aria-label="${t("edit")}">${ICON_EDIT}</button>
         ${CONTEXTS.length > 1 ? `<button class="cfg-del" onclick="removeCtx('${c}')">×</button>` : ""}
+      </div>
+    </div>`;
+  }).join("");
+
+  const groupItems = GROUPS.map((g, i) => `
+    <div class="cfg-group">
+      <div class="cfg-group-head">
+        <input class="cfg-input cfg-group-name" value="${esc(g.name)}" maxlength="40"
+          onchange="renameGroup(${i}, this.value)">
+        <button class="cfg-del" onclick="removeGroup(${i})">×</button>
+      </div>
+      <div class="cfg-group-cats">
+        ${CONTEXTS.map(c => {
+          const on = g.contexts.includes(c);
+          return `<button class="gcat ${on ? "on" : ""}" onclick="toggleGroupCtx(${i},'${c}')"
+            style="${on ? `background:var(--${c}-bg,var(--chip-bg));color:var(--${c},var(--chip-fg))` : ""}">${c}</button>`;
+        }).join("")}
       </div>
     </div>`).join("");
 
@@ -1150,6 +1479,17 @@ function renderConfig() {
     </div>
 
     <div class="cfg-section">
+      <div class="cfg-label">${t("filters")}</div>
+      ${groupItems || `<div class="cfg-hint" style="margin-top:0">${t("noFilters")}</div>`}
+      <div class="cfg-add" style="margin-top:10px">
+        <input id="new-group" class="cfg-input" placeholder="${t("newGroup")}" maxlength="40"
+          onkeydown="if(event.key==='Enter')addGroup()">
+        <button class="cfg-addbtn" onclick="addGroup()">${t("add")}</button>
+      </div>
+      <div class="cfg-hint">${t("filterHint")}</div>
+    </div>
+
+    <div class="cfg-section">
       <div class="cfg-label">${t("dataSection")}</div>
       <button class="cfg-btn" onclick="exportTxt()">${ICON_EXPORT} ${t("exportTxt")}</button>
     </div>
@@ -1161,9 +1501,10 @@ function renderConfig() {
 
   const inp = document.getElementById("new-ctx");
   if (inp) inp.addEventListener("keydown", e => { if (e.key === "Enter") addCtx(); });
+  focusEdit();
 }
 
-function setView(v) { closeAc(); view = v; render(); }
+function setView(v) { closeAc(); editing = null; editingCtx = null; taskActions = null; view = v; render(); }
 function setFilter(f) { filter = f; render(); }
 function setGFilter(f) { gFilter = f; render(); }
 function resetSetup() {
@@ -1175,6 +1516,10 @@ function resetSetup() {
 // boot
 window.addEventListener("online",  () => { online = true;  flushQueue(); });
 window.addEventListener("offline", () => { online = false; render(); });
+
+// Deep-link to a tab via #gedanken / #config (also used for screenshots).
+const hashView = location.hash.replace("#", "");
+if (["gedanken", "config", "aufgaben"].includes(hashView)) view = hashView;
 
 if (!API || !TOKEN) {
   renderSetup();
